@@ -391,7 +391,7 @@ public class EsqlQueryRequest extends org.elasticsearch.xpack.core.esql.action.E
     }
 
     public Map<QuerySettingDef<?>, Object> requestSettings() {
-        // Immutable view: callers read (resolve, telemetry) but must go through set() to mutate (it enforces null-removes).
+        // Immutable snapshot: callers read (resolve, telemetry) but must go through set() to mutate (it enforces null-removes).
         return Map.copyOf(requestSettings);
     }
 
