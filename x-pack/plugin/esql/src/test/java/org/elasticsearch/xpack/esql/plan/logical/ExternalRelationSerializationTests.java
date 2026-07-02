@@ -163,4 +163,25 @@ public class ExternalRelationSerializationTests extends AbstractLogicalPlanSeria
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> copyInstance(original, before));
         assertThat(e.getMessage(), containsString("not supported on all nodes"));
     }
+
+    /**
+     * An EMPTY spec toward a node predating {@code dataset_declared_schema} must still serialize cleanly — only a
+     * NON-empty spec is rejected. Guards the {@code else if (isEmpty() == false)} branch against an always-throw regression.
+     */
+    public void testEmptyDeclaredReadSpecSerializesToOlderTransportVersion() throws IOException {
+        List<Attribute> output = randomFieldAttributes(1, 3, false);
+        SimpleSourceMetadata metadata = new SimpleSourceMetadata(output, "csv", "s3://bucket/x.csv", null, null, Map.of(), Map.of());
+        // Six-arg constructor => default (NONE) spec.
+        ExternalRelation original = new ExternalRelation(
+            randomSource(),
+            metadata.location(),
+            metadata,
+            output,
+            FileList.UNRESOLVED,
+            Map.of()
+        );
+        TransportVersion before = TransportVersionUtils.getPreviousVersion(TransportVersion.fromName("dataset_declared_schema"));
+        ExternalRelation roundTripped = copyInstance(original, before);
+        assertThat(roundTripped.declaredReadSpec(), equalTo(DeclaredReadSpec.NONE));
+    }
 }

@@ -469,9 +469,11 @@ public class ExternalSourceResolver {
     }
 
     /**
-     * Strict single-file resolution: the declared mapping is the entire schema, so no inference and no schema-cache
-     * lookup happen — the declaration is content-independent. Only the file's size/mtime is read (for split planning,
-     * the same data-read requirement the inferred path has). Both the user-facing output and the per-file schema carry
+     * Strict single-file resolution: the declared mapping is the entire schema, so text formats need no inference — the
+     * declaration is content-independent and only the file's size/mtime is read (for split planning, the same data-read
+     * requirement the inferred path has). Columnar formats are the one exception: {@link #rejectStrictColumnarTypeMismatch}
+     * reads the footer (cached) to validate the declared types against the file's own, so a mismatch fails loud rather
+     * than yielding silent nulls. Both the user-facing output and the per-file schema carry
      * the declared <b>logical</b> names (identity column mapping); a {@code path} rename is applied to physical only at
      * the reader boundary via {@link PhysicalNames}, so the operator and reconciliation stay in logical space.
      */
@@ -491,9 +493,18 @@ public class ExternalSourceResolver {
         // FormatNameResolver, which applies the same reader-then-format-then-extension precedence (and lowercasing)
         // as the inferred path. A hand-rolled `format` check here would miss both and mis-key the dispatch.
         String sourceType = FormatNameResolver.resolve(config, path);
-        // Single file => no partition metadata; the combined guard's partition check no-ops on null.
+        // Cheap no-I/O guard first (format-on-columnar; no partitions on a single file), then the columnar type check
+        // which reads this file's footer (cached when the provider is).
         rejectDeclaredMappingViolations(sourceType, null, declaredMapping);
-        rejectStrictColumnarTypeMismatch(sourceType, path, config, declaredMapping);
+        Instant singleMtime = object.lastModified();
+        rejectStrictColumnarTypeMismatch(
+            sourceType,
+            provider,
+            storagePath,
+            singleMtime != null ? singleMtime.toEpochMilli() : Instant.EPOCH.toEpochMilli(),
+            config,
+            declaredMapping
+        );
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -519,8 +530,10 @@ public class ExternalSourceResolver {
     }
 
     /**
-     * Strict multi-file resolution: the declared mapping is the entire schema for every file, so only the glob is
-     * listed — no per-file metadata reads. Each file resolves to the declared schema (identity mapping).
+     * Strict multi-file resolution: the declared mapping is the entire schema for every file, so text formats need only
+     * the glob listed — no per-file metadata reads. Columnar formats are the one exception:
+     * {@link #rejectStrictColumnarTypeMismatch} reads one anchor file's footer (cached) to validate the declared types.
+     * Each file resolves to the declared schema (identity mapping).
      */
     private ExternalSourceResolution.ResolvedSource resolveStrictMultiFile(
         String path,
@@ -558,24 +571,27 @@ public class ExternalSourceResolver {
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
         // Same reader-then-format-then-extension dispatch as the single-file strict path above.
         String sourceType = FormatNameResolver.resolve(config, path);
-        // Columnar strict: validate declared types against one anchor file's physical schema (silent-null trap).
-        rejectStrictColumnarTypeMismatch(sourceType, listing.path(0).toString(), config, declaredMapping);
-        ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
-            new SimpleSourceMetadata(logicalSchema, sourceType, path),
-            config,
-            declaredReadSpecOf(declaredMapping)
-        );
-        extMetadata = enrichWithFileCount(extMetadata, listing.fileCount());
 
         // Partition columns are path-derived (no file I/O), so strict mode surfaces them exactly like the inferred
         // path does. One divergence: the inferred path SHADOWS a physical column that collides with a partition key
         // (partition wins, Spark/DuckDB semantics), but under strict the declaration drives the reader's file schema
         // — text formats bind positionally — so silently dropping a declared column would silently re-bind the rest.
         // A declared column colliding with a partition key is rejected instead: partition columns need no declaring.
-        // The combined guard (format-on-columnar + partition collision) the other declaration paths run; strict skips
-        // only rejectFileTypedRetypes, which needs an inferred schema strict never reads.
+        // Cheap no-I/O guards first (format-on-columnar + partition collision); strict skips only rejectFileTypedRetypes,
+        // which needs an inferred schema strict never reads.
         PartitionMetadata partitionMetadata = listing.partitionMetadata();
         rejectDeclaredMappingViolations(sourceType, partitionMetadata, declaredMapping);
+        // Then the columnar type check, which reads the anchor footer — re-check cancellation first, as a wide glob's
+        // listing above can be slow (mirrors resolveMultiFileSource's pre-footer re-check).
+        throwIfCancelled();
+        rejectStrictColumnarTypeMismatch(sourceType, provider, listing.path(0), listing.lastModifiedMillis(0), config, declaredMapping);
+
+        ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
+            new SimpleSourceMetadata(logicalSchema, sourceType, path),
+            config,
+            declaredReadSpecOf(declaredMapping)
+        );
+        extMetadata = enrichWithFileCount(extMetadata, listing.fileCount());
         if (partitionMetadata != null && partitionMetadata.isEmpty() == false) {
             extMetadata = enrichSchemaWithPartitionColumns(extMetadata, partitionMetadata);
         }
@@ -657,13 +673,6 @@ public class ExternalSourceResolver {
     }
 
     /**
-     * For a file-typed format, every declared column's type must equal the reconciled (inferred) type of the physical
-     * column it reads. The readers emit the file's own types; reconciliation already casts per file toward the unified
-     * type — so a matching declaration works by construction, and a differing one would surface as an internal block
-     * type mismatch deep in the engine. Reject it here, at resolution, with an actionable message instead. (Casting a
-     * columnar column to a different declared type is a natural later increment on this same seam.)
-     */
-    /**
      * Rejects a declared column that collides with a hive partition key, for BOTH strict and non-strict declarations. A
      * partition column is path-derived (the partition value is the same for every row of a file) and needs no declaring;
      * declaring one either silently re-binds the positional text columns (strict) or overlays/retypes the partition
@@ -694,27 +703,42 @@ public class ExternalSourceResolver {
      * For a STRICT declaration on a columnar (file-typed) format, validate the declared column types against the file's
      * physical schema. Strict builds its output purely from the declaration and never reads content, but a columnar
      * reader emits the file's OWN types — so a declared type that differs from the physical type does not error and does
-     * not reinterpret; it yields silent nulls. Read the physical schema (of a single anchor file, cached upstream by the
-     * same schema cache the non-strict path uses) and run the same type check the non-strict overlay runs, turning the
-     * silent-null trap into an actionable resolution error. No-op for text formats, which parse into the declared type.
+     * not reinterpret; it yields silent nulls. Read one anchor file's physical schema — through the schema cache when the
+     * provider is cacheable, exactly like the inferred path, so repeat queries against a strict columnar dataset do not
+     * re-read the footer — and run the same type check the non-strict overlay runs, turning the silent-null trap into an
+     * actionable resolution error. No-op for text formats, which parse into the declared type.
      */
     private void rejectStrictColumnarTypeMismatch(
         String sourceType,
-        String anchorPath,
+        StorageProvider provider,
+        StoragePath anchor,
+        long anchorMtime,
         Map<String, Object> config,
         DatasetMapping declaredMapping
     ) throws Exception {
         if (sourceType == null || FILE_TYPED_FORMATS.contains(sourceType) == false || declaredMapping.mappings() == null) {
             return;
         }
-        ExternalSourceMetadata inferred = wrapAsExternalSourceMetadata(
-            resolveSingleSource(anchorPath, config),
-            config,
-            DeclaredReadSpec.NONE
+        List<Attribute> physicalSchema = (isCacheable(provider)
+            ? cachedResolveSingleSource(anchor, anchorMtime, config)
+            : resolveSingleSource(anchor.toString(), config)).schema();
+        rejectFileTypedRetypes(
+            wrapAsExternalSourceMetadata(
+                new SimpleSourceMetadata(physicalSchema, sourceType, anchor.toString()),
+                config,
+                DeclaredReadSpec.NONE
+            ),
+            declaredMapping
         );
-        rejectFileTypedRetypes(inferred, declaredMapping);
     }
 
+    /**
+     * For a file-typed format, every declared column's type must equal the reconciled (inferred) type of the physical
+     * column it reads. The readers emit the file's own types; reconciliation already casts per file toward the unified
+     * type — so a matching declaration works by construction, and a differing one would surface as an internal block
+     * type mismatch deep in the engine. Reject it here, at resolution, with an actionable message instead. (Casting a
+     * columnar column to a different declared type is a natural later increment on this same seam.)
+     */
     private static void rejectFileTypedRetypes(ExternalSourceMetadata inferred, DatasetMapping declaredMapping) {
         Map<String, DataType> inferredTypes = new HashMap<>();
         for (Attribute a : inferred.schema()) {

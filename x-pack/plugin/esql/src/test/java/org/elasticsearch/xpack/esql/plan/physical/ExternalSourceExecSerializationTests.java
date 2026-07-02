@@ -247,4 +247,15 @@ public class ExternalSourceExecSerializationTests extends AbstractPhysicalPlanSe
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> copyInstance(original, before));
         assertThat(e.getMessage(), containsString("not supported on all nodes"));
     }
+
+    /**
+     * An EMPTY spec toward a node predating {@code dataset_declared_schema} must still serialize cleanly — only a
+     * NON-empty spec is rejected. Guards the {@code else if (isEmpty() == false)} branch against an always-throw regression.
+     */
+    public void testEmptyDeclaredReadSpecSerializesToOlderTransportVersion() throws IOException {
+        ExternalSourceExec original = externalSourceExecWithConfig(Map.of("format", "csv")); // default spec is NONE
+        TransportVersion before = TransportVersionUtils.getPreviousVersion(TransportVersion.fromName("dataset_declared_schema"));
+        ExternalSourceExec roundTripped = copyInstance(original, before);
+        assertThat(roundTripped.declaredReadSpec(), equalTo(DeclaredReadSpec.NONE));
+    }
 }

@@ -2374,6 +2374,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         );
         assertThat(e.getMessage(), containsString("[_id]"));
         assertThat(e.getMessage(), containsString("region"));
+        // Pin the partition branch specifically, not the sibling "no such column exists" reject (both embed [_id]+path).
+        assertThat(e.getMessage(), containsString("not a data column"));
     }
 
     public void testNonStrictPartitionKeyCollisionRejected() throws Exception {

@@ -89,20 +89,6 @@ public class ExternalSourceResolverTests extends ESTestCase {
         blockFactory = BlockFactory.builder(BigArrays.NON_RECYCLING_INSTANCE).breaker(new NoopCircuitBreaker("test")).build();
     }
 
-    // ===== FIRST_FILE_WINS tests (current behavior) =====
-
-    /**
-     * Multi-file glob with three files whose schemas widen across files: the anchor (file1) has
-     * a strict subset of file2's columns, and file3 has a strict subset of file1's columns.
-     * The two strategies must produce different but equally well-defined schemas:
-     * <ul>
-     *   <li>FFW pins the anchor's columns ([emp_no, name]); columns present only in non-anchor
-     *       files (extra) are dropped, columns missing from non-anchor files are filled at read
-     *       time.</li>
-     *   <li>UNION_BY_NAME unions all columns in first-seen order ([emp_no, name, extra]); types
-     *       are preserved verbatim since each column's type is consistent across files.</li>
-     * </ul>
-     */
     /**
      * Guards {@link ExternalSourceResolver#FILE_TYPED_FORMATS} — the hand-maintained classification of columnar
      * (self-typed) formats that gates all three columnar declaration rejects (format-on-columnar, strict type mismatch,
@@ -121,6 +107,20 @@ public class ExternalSourceResolverTests extends ESTestCase {
         assertFalse(ExternalSourceResolver.FILE_TYPED_FORMATS.contains("ndjson"));
     }
 
+    // ===== FIRST_FILE_WINS tests (current behavior) =====
+
+    /**
+     * Multi-file glob with three files whose schemas widen across files: the anchor (file1) has
+     * a strict subset of file2's columns, and file3 has a strict subset of file1's columns.
+     * The two strategies must produce different but equally well-defined schemas:
+     * <ul>
+     *   <li>FFW pins the anchor's columns ([emp_no, name]); columns present only in non-anchor
+     *       files (extra) are dropped, columns missing from non-anchor files are filled at read
+     *       time.</li>
+     *   <li>UNION_BY_NAME unions all columns in first-seen order ([emp_no, name, extra]); types
+     *       are preserved verbatim since each column's type is consistent across files.</li>
+     * </ul>
+     */
     public void testMultiFileResolvedSchemaPerStrategy() throws Exception {
         List<Attribute> schema1 = List.of(attr("emp_no", DataType.INTEGER), attr("name", DataType.KEYWORD));
         List<Attribute> schema2 = List.of(attr("emp_no", DataType.INTEGER), attr("name", DataType.KEYWORD), attr("extra", DataType.LONG));
