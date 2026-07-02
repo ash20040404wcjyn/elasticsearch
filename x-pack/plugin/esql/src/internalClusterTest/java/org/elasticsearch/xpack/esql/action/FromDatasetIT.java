@@ -226,7 +226,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "logs_ndjson",
         "logs_csv_rename",
         "logs_csv_gz",
-        "logs_parquet_strict_format"
+        "logs_parquet_strict_format",
+        "logs_noext_strict"
     );
 
     /**
@@ -845,6 +846,38 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         );
         assertThat(e.getMessage(), containsString("[format] on column [ts]"));
         assertThat(e.getMessage(), containsString("parquet"));
+    }
+
+    public void testStrictDatasetWithUnknowableFormatFailsCleanlyNotNpe() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // A strict dataset over an extensionless path with no `format` setting has an unknowable sourceType (null). The
+        // columnar-format reject must guard that null (an immutable Set throws on contains(null)) so the query keeps its
+        // prior clean failure instead of an NPE-wrapped 500 — even though no date format is declared here.
+        Path noExt = createTempFile("dataset-noext-", "");
+        Files.writeString(noExt, "id\n1\n");
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("id", new DatasetFieldMapping("long", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_noext_strict",
+                    "local_ds",
+                    noExt.toUri().toString(),
+                    null,
+                    new HashMap<>(),
+                    mapping
+                )
+            )
+        );
+
+        Exception e = expectThrows(Exception.class, () -> run(syncEsqlQueryRequest("FROM logs_noext_strict | LIMIT 1"), TIMEOUT).close());
+        assertThat(e.getMessage(), not(containsString("NullPointerException")));
     }
 
     public void testNdJsonRenameStrictReadsByPhysicalJsonKey() throws Exception {

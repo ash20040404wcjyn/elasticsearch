@@ -614,7 +614,10 @@ public class ExternalSourceResolver {
      * declaration — no inferred schema — so the strict paths can call it too.
      */
     private static void rejectDeclaredFormatOnColumnar(String sourceType, DatasetMapping declaredMapping) {
-        if (FILE_TYPED_FORMATS.contains(sourceType) == false || declaredMapping.mappings() == null) {
+        // sourceType is null when the format is not knowable (extensionless path, no format/reader override); guard it
+        // before Set.contains (an immutable Set throws on a null arg) so an unresolvable-format dataset keeps its prior
+        // clean downstream error instead of an NPE-wrapped 500.
+        if (sourceType == null || FILE_TYPED_FORMATS.contains(sourceType) == false || declaredMapping.mappings() == null) {
             return;
         }
         for (Map.Entry<String, DatasetFieldMapping> e : declaredMapping.mappings().properties().entrySet()) {
