@@ -91,7 +91,8 @@ public class ConfigurationTestUtils {
             false,
             tsTruncation,
             defaultTsTruncation,
-            ResolvedSettings.EMPTY.withOverride(QuerySettings.TIME_ZONE, zoneId.normalized()),
+            // No manual normalize — TIME_ZONE.canonicalize(ZoneId::normalized) runs inside withOverride.
+            ResolvedSettings.EMPTY.withOverride(QuerySettings.TIME_ZONE, zoneId),
             Map.of()
         );
     }

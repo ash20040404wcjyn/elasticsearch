@@ -7,7 +7,8 @@
 
 package org.elasticsearch.xpack.esql.plan;
 
-import org.elasticsearch.common.logging.HeaderWarning;
+import org.elasticsearch.common.logging.DeprecationCategory;
+import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.esql.VerificationException;
 import org.elasticsearch.xpack.esql.analysis.UnmappedResolution;
@@ -48,6 +49,8 @@ import java.util.Map;
  * {@code MY_SETTING.get(resolvedSettings)}.
  */
 public final class QuerySettings {
+
+    private static final DeprecationLogger deprecationLogger = DeprecationLogger.getLogger(QuerySettings.class);
 
     @Param(name = "project_routing", type = { "keyword" }, description = """
         Limits the scope of a [cross-project search (CPS)](/reference/query-languages/esql/esql-cross-serverless-projects.md) to \
@@ -246,13 +249,21 @@ public final class QuerySettings {
     }
 
     /**
-     * Emits a deprecation warning if {@code def} is deprecated. Called from both settings surfaces (in-query
-     * {@code SET} and the request body) so a deprecated setting warns wherever it is supplied, while still
-     * being resolved and applied.
+     * Emits a deprecation warning if {@code def} is deprecated. Called from every settings surface (in-query
+     * {@code SET}, the request body, and the legacy root aliases) so a deprecated setting warns wherever it is
+     * supplied, while still being resolved and applied. Routed through {@link DeprecationLogger} (not a bare
+     * response header) so it also lands in the throttled operator-facing deprecation trail, matching how the rest
+     * of the module deprecates user-supplied knobs (e.g. the datasource {@code auth} aliases).
      */
     public static void warnIfDeprecated(QuerySettingDef<?> def) {
         if (def.deprecationMessage() != null) {
-            HeaderWarning.addWarning("Setting [" + def.name() + "] is deprecated: " + def.deprecationMessage());
+            deprecationLogger.warn(
+                DeprecationCategory.API,
+                "esql_setting_" + def.name(),
+                "Setting [{}] is deprecated: {}",
+                def.name(),
+                def.deprecationMessage()
+            );
         }
     }
 
@@ -326,9 +337,19 @@ public final class QuerySettings {
         }
 
         if (value != null) {
-            String error = def.runValidator(value, ctx);
-            if (error != null) {
-                throw new VerificationException("Error validating setting [" + def.name() + "]: " + error);
+            // Validate only a value the user actually supplied — a registry default must never fail a query, and an
+            // environment-gated validator (e.g. project_routing's cross-project check) would otherwise reject every
+            // query in the wrong environment. Wrap a throwing validator as a 400, matching the SET path (runTypedValidator).
+            if (userSupplied) {
+                String error;
+                try {
+                    error = def.runValidator(value, ctx);
+                } catch (Exception e) {
+                    throw new VerificationException("Error validating setting [" + def.name() + "]: " + e.getMessage());
+                }
+                if (error != null) {
+                    throw new VerificationException("Error validating setting [" + def.name() + "]: " + error);
+                }
             }
             resolved.put(def, def.canonicalize(value));
         }

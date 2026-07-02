@@ -835,6 +835,21 @@ public class EsqlQueryRequestTests extends ESTestCase {
         assertEquals(ZoneId.of("Europe/Paris"), request.get(QuerySettings.TIME_ZONE));
     }
 
+    public void testSettingsBlockAcceptsSameZoneDifferentSpelling() throws IOException {
+        // "UTC" and "Z" are the same zone after normalization, so supplying one at each surface is not a conflict —
+        // the duplicate check compares canonical forms, as parseZoneId's comment promises.
+        String json = """
+            {
+                "query": "FROM idx",
+                "time_zone": "UTC",
+                "settings": {
+                    "time_zone": "Z"
+                }
+            }""";
+        EsqlQueryRequest request = parseEsqlQueryRequestSync(json);
+        assertEquals(ZoneId.of("Z"), request.get(QuerySettings.TIME_ZONE));
+    }
+
     public void testSettingsBlockRejectsUnknownKey() {
         // The parser wraps XContentParseException; the inner cause carries our detailed message.
         Exception e = expectThrows(IllegalArgumentException.class, () -> parseEsqlQueryRequestSync("""

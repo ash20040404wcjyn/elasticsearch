@@ -211,8 +211,9 @@ public final class QuerySettingDef<T> {
     }
 
     /**
-     * Coerce a value into this setting's canonical form. Applied on every write into a resolved view (both the
-     * resolver and {@link ResolvedSettings#withOverride}), so a value reaches consumers in one shape no matter
+     * Coerce a value into this setting's canonical form. Applied on every write into a resolved view (the
+     * resolver, {@link ResolvedSettings#withOverride}, and the {@code ResolvedSettings(StreamInput)} wire reader),
+     * so a value reaches consumers in one shape no matter
      * which surface supplied it — e.g. {@code time_zone} normalizes {@code ZoneId}s so {@code "UTC"} and
      * {@code "Z"} compare equal. Defaults to identity. {@code null} passes through untouched.
      */

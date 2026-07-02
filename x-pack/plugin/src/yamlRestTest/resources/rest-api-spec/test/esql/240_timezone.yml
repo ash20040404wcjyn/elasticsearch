@@ -383,7 +383,7 @@ Unknown in-query SET key is rejected:
           parameters: [ ]
           capabilities: [ query_settings_request_body ]
       test_runner_features: [ capabilities ]
-      reason: "Unknown SET keys now fail loudly instead of warning"
+      reason: "gated on the newest settings-body behavior; unknown SET keys are rejected (as they always were)"
   - do:
       catch: bad_request
       esql.query:

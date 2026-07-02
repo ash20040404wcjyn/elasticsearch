@@ -12,6 +12,7 @@ import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.core.Nullable;
 
 import java.io.IOException;
@@ -38,7 +39,7 @@ public final class ResolvedSettings implements Writeable {
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public ResolvedSettings(StreamInput in) throws IOException {
         int n = in.readVInt();
-        Map<QuerySettingDef<?>, Object> v = new HashMap<>(n);
+        Map<QuerySettingDef<?>, Object> v = Maps.newHashMapWithExpectedSize(n);
         for (int i = 0; i < n; i++) {
             String name = in.readString();
             // Each value is a self-delimiting blob (see writeTo). A setting this node doesn't know — a newer peer's
@@ -86,10 +87,6 @@ public final class ResolvedSettings implements Writeable {
     <T> T get(QuerySettingDef<T> def) {
         Object v = values.get(def);
         return v != null ? (T) v : def.defaultValue();
-    }
-
-    Map<QuerySettingDef<?>, Object> values() {
-        return values;
     }
 
     @Override

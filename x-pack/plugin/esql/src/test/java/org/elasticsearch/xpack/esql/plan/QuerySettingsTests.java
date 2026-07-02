@@ -24,14 +24,18 @@ import org.hamcrest.Matcher;
 import org.junit.AfterClass;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.elasticsearch.xpack.esql.EsqlTestUtils.of;
 import static org.elasticsearch.xpack.esql.EsqlTestUtils.randomizeCase;
@@ -83,6 +87,18 @@ public class QuerySettingsTests extends ESTestCase {
         ResolvedSettings resolved = ResolvedSettings.EMPTY.withOverride(QuerySettings.TIME_ZONE, ZoneId.of("UTC"));
         assertThat(QuerySettings.TIME_ZONE.get(resolved), equalTo(ZoneId.of("UTC").normalized()));
         assertThat(QuerySettings.TIME_ZONE.get(resolved), not(equalTo(ZoneId.of("UTC"))));
+    }
+
+    public void testAllContainsEveryDeclaredSetting() throws IllegalAccessException {
+        // Adding a QuerySettingDef constant but forgetting to add it to ALL compiles fine and fails only as an
+        // "Unknown setting" at use — the one silent-miss in "add a setting". Guard it: every declared constant is in ALL.
+        Set<QuerySettingDef<?>> declared = new HashSet<>();
+        for (Field f : QuerySettings.class.getFields()) {
+            if (Modifier.isStatic(f.getModifiers()) && QuerySettingDef.class.isAssignableFrom(f.getType())) {
+                declared.add((QuerySettingDef<?>) f.get(null));
+            }
+        }
+        assertThat(Set.copyOf(QuerySettings.all()), equalTo(declared));
     }
 
     public void testValidate_ProjectRouting() {

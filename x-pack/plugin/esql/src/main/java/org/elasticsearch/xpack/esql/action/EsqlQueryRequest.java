@@ -391,7 +391,8 @@ public class EsqlQueryRequest extends org.elasticsearch.xpack.core.esql.action.E
     }
 
     public Map<QuerySettingDef<?>, Object> requestSettings() {
-        return requestSettings;
+        // Immutable view: callers read (resolve, telemetry) but must go through set() to mutate (it enforces null-removes).
+        return Map.copyOf(requestSettings);
     }
 
     Map<QuerySettingDef<?>, Object> canonicalRequestSettings() {
