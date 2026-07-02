@@ -177,7 +177,7 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
     }
 
     /**
-     * The dataset's user-declared mapping (mapping + role designations), or {@code null} when the dataset has none
+     * The dataset's user-declared mapping (the `mappings` block), or {@code null} when the dataset has none
      * (inference only) or for the inline {@code EXTERNAL} path. Consumed by the external-source resolver.
      */
     @Nullable

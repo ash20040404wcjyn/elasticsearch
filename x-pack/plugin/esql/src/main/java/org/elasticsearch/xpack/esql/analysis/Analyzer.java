@@ -796,6 +796,38 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                         "[_source] is not available: it is disabled (_source.enabled: false) for this dataset"
                     );
                 }
+                // _id.path names the column the reader stamps _id from. If the dataset declares one but the resolved
+                // schema has no such DATA column — a typo, the files lost it, or it is a partition/virtual column the
+                // reader never materializes per row — reject the _id request loudly rather than returning silently-null
+                // ids. Fires only when _id is actually asked for — a bad _id.path on a query that never reads _id is
+                // moot, like any other unread column.
+                if (ExternalMetadataColumns.ID.equals(name)) {
+                    String idPath = declaredIdPath(plan);
+                    if (idPath != null) {
+                        Attribute idSource = null;
+                        for (Attribute a : baseSchema) {
+                            if (a.name().equals(idPath)) {
+                                idSource = a;
+                                break;
+                            }
+                        }
+                        if (idSource == null) {
+                            throw new IllegalArgumentException(
+                                "[_id] is declared to come from column ["
+                                    + idPath
+                                    + "] (mappings._id.path), but no such column exists in the dataset's schema"
+                            );
+                        }
+                        if (idSource instanceof VirtualAttribute || idSource instanceof ExternalMetadataAttribute) {
+                            throw new IllegalArgumentException(
+                                "[_id] is declared to come from ["
+                                    + idPath
+                                    + "] (mappings._id.path), which is not a data column of the files; _id must come from a "
+                                    + "column the reader materializes per row"
+                            );
+                        }
+                    }
+                }
                 DataType type = MetadataAttribute.dataType(name);
                 if (type == null) {
                     type = FileMetadataColumns.COLUMNS.get(name);
@@ -823,6 +855,12 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
         private static boolean sourceDisabled(UnresolvedExternalRelation plan) {
             var mapping = plan.mapping();
             return mapping != null && mapping.mappings() != null && mapping.mappings().sourceAvailable() == false;
+        }
+
+        /** The declared {@code mappings._id.path}, or {@code null} when the dataset does not set {@code _id} from a column. */
+        private static String declaredIdPath(UnresolvedExternalRelation plan) {
+            var mapping = plan.mapping();
+            return mapping != null && mapping.mappings() != null ? mapping.mappings().idPath() : null;
         }
 
         private String extractTablePath(Expression tablePath) {

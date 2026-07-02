@@ -58,6 +58,13 @@ public final class DeclaredSchemaValidator {
         }
         DatasetMapping.Mappings mappings = mapping.mappings();
         if (mappings != null) {
+            // Strict mode means "the declaration IS the schema" — with no declared columns there is no schema, and the
+            // zero-column relation the resolver would build is not a queryable thing. Reject rather than let it fail
+            // downstream. (An _id.path-only strict block is not a legitimate shape either: strict already requires the
+            // id column to be declared.)
+            if (mappings.dynamic() == DatasetMapping.Dynamic.FALSE && mappings.properties().isEmpty()) {
+                throw new IllegalArgumentException("[dynamic: false] requires at least one declared column under [properties]");
+            }
             // Physical-name uniqueness for the read (move) columns: a column's physical name is its `path`, or its
             // logical name. Two columns resolving to one physical break the 1:1 read-path rename, so reject. (A COPY is
             // NOT a shared physical: `copy_to` is materialized as an EVAL above the relation, so it never touches the
@@ -65,6 +72,8 @@ public final class DeclaredSchemaValidator {
             Set<String> outputNames = new HashSet<>();
             Map<String, String> physicalToLogical = new HashMap<>();
             for (Map.Entry<String, DatasetFieldMapping> e : mappings.properties().entrySet()) {
+                requireNonBlank(e.getKey(), "column name");
+                requireNonBlank(e.getValue().path(), "path of column [" + e.getKey() + "]");
                 validateType(e.getKey(), e.getValue().type());
                 outputNames.add(e.getKey()); // property keys are unique by JSON-object semantics
                 String logical = e.getKey();
@@ -77,17 +86,38 @@ public final class DeclaredSchemaValidator {
                 }
             }
             // Every copy_to target is a NEW output column — it must not collide with a declared column or another target.
+            Set<String> copyToTargets = new HashSet<>();
             for (Map.Entry<String, DatasetFieldMapping> e : mappings.properties().entrySet()) {
                 for (String copyTo : e.getValue().copyTo()) {
+                    requireNonBlank(copyTo, "copy_to target of column [" + e.getKey() + "]");
                     if (outputNames.add(copyTo) == false) {
                         throw new IllegalArgumentException(
                             "copy_to target [" + copyTo + "] on column [" + e.getKey() + "] collides with another declared column"
                         );
                     }
+                    copyToTargets.add(copyTo);
                 }
             }
+            requireNonBlank(mappings.idPath(), "[_id] path");
+            // _id must be stamped from a column that is actually read from the file. A copy_to target is a projection
+            // computed above the read (it has no per-row storage the reader can see), so pointing _id at one would
+            // silently produce null ids — reject it at PUT instead.
+            if (mappings.idPath() != null && copyToTargets.contains(mappings.idPath())) {
+                throw new IllegalArgumentException(
+                    "[_id] path ["
+                        + mappings.idPath()
+                        + "] references a copy_to target; _id must be read from a column of the file, not a copy"
+                );
+            }
             boolean strict = mappings.dynamic() == DatasetMapping.Dynamic.FALSE;
-            validateRole("_id", mappings.idPath(), mappings, strict);
+            validateIdPath(mappings, strict);
+        }
+    }
+
+    /** Rejects blank names (the index-mapping precedent: field names must be non-empty). {@code null} means "unset" and passes. */
+    private static void requireNonBlank(String value, String what) {
+        if (value != null && value.isBlank()) {
+            throw new IllegalArgumentException(what + " must not be empty");
         }
     }
 
@@ -100,7 +130,8 @@ public final class DeclaredSchemaValidator {
         }
     }
 
-    private static void validateRole(String role, String column, DatasetMapping.Mappings mappings, boolean strict) {
+    private static void validateIdPath(DatasetMapping.Mappings mappings, boolean strict) {
+        String column = mappings.idPath();
         if (column == null) {
             return;
         }
@@ -108,9 +139,7 @@ public final class DeclaredSchemaValidator {
         if (declared == null && strict) {
             // Not declared: under strict mode there is nothing to infer it from, so it must be declared.
             // Under non-strict mode it may come from inference — defer the existence check to first query.
-            throw new IllegalArgumentException(
-                "[" + role + "] references column [" + column + "] which is not declared, and dynamic is [false]"
-            );
+            throw new IllegalArgumentException("[_id] references column [" + column + "] which is not declared, and dynamic is [false]");
         }
     }
 

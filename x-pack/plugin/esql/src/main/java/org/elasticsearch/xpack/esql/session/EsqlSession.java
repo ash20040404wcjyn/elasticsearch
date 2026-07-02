@@ -1519,19 +1519,37 @@ public class EsqlSession {
 
     /**
      * Map from table path to the dataset's user-declared schema, for the {@code UnresolvedExternalRelation} nodes
-     * that carry one ({@code FROM <dataset>} where the dataset declared a mapping/roles). Paths without a declared
+     * that carry one ({@code FROM <dataset>} where the dataset declared a mapping). Paths without a declared
      * schema are absent — the resolver infers them as before.
+     *
+     * <p>Resolution is per-path, so one path gets exactly one schema. Two datasets over the same resource with
+     * <em>different</em> declared mappings in one query — or one mapped and one unmapped — would silently share
+     * whichever resolution won; that is a wrong-schema answer, so it is rejected loudly here instead.
      */
     // package-private for testing
     static Map<String, DatasetMapping> extractDeclaredMappings(LogicalPlan plan) {
         Map<String, DatasetMapping> declaredMappings = new HashMap<>();
+        Set<String> unmappedPaths = new HashSet<>();
         plan.forEachUp(org.elasticsearch.xpack.esql.plan.logical.UnresolvedExternalRelation.class, p -> {
-            if (p.mapping() != null
-                && p.tablePath() instanceof org.elasticsearch.xpack.esql.core.expression.Literal literal
-                && literal.value() != null) {
-                declaredMappings.put(org.elasticsearch.common.lucene.BytesRefs.toString(literal.value()), p.mapping());
+            if (p.tablePath() instanceof org.elasticsearch.xpack.esql.core.expression.Literal literal && literal.value() != null) {
+                String path = org.elasticsearch.common.lucene.BytesRefs.toString(literal.value());
+                if (p.mapping() != null) {
+                    DatasetMapping previous = declaredMappings.putIfAbsent(path, p.mapping());
+                    if (previous != null && previous.equals(p.mapping()) == false) {
+                        throw new IllegalArgumentException(
+                            "resource [" + path + "] is read through datasets with different declared mappings in one query"
+                        );
+                    }
+                } else {
+                    unmappedPaths.add(path);
+                }
             }
         });
+        for (String path : unmappedPaths) {
+            if (declaredMappings.containsKey(path)) {
+                throw new IllegalArgumentException("resource [" + path + "] is read both with and without a declared mapping in one query");
+            }
+        }
         return declaredMappings;
     }
 

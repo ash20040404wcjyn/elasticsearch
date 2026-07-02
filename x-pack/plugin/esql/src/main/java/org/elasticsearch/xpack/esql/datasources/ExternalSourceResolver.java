@@ -495,14 +495,14 @@ public class ExternalSourceResolver {
         DatasetMapping declaredMapping
     ) throws Exception {
         StorageObject object = provider.newObject(storagePath);
-        // Declared mapping is the whole schema, in LOGICAL names; a `source` rename is applied at the reader, so the
+        // Declared mapping is the whole schema, in LOGICAL names; a `path` rename is applied at the reader, so the
         // operator (and file schema) work purely in logical names.
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
         // sourceType drives operator-factory dispatch (OperatorFactoryRegistry keys on it), so it must equal the
-        // reader's formatName() the inferred path would have produced — derive it without reading the file: an explicit
-        // `format` setting wins, otherwise the `reader` override / file extension via FormatNameResolver.
-        Object formatOverride = config.get(FileSourceFactory.CONFIG_FORMAT);
-        String sourceType = formatOverride != null ? String.valueOf(formatOverride) : FormatNameResolver.resolve(config, path);
+        // reader's formatName() the inferred path would have produced — derive it without reading the file via
+        // FormatNameResolver, which applies the same reader-then-format-then-extension precedence (and lowercasing)
+        // as the inferred path. A hand-rolled `format` check here would miss both and mis-key the dispatch.
+        String sourceType = FormatNameResolver.resolve(config, path);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config
@@ -557,16 +557,36 @@ public class ExternalSourceResolver {
             throw new IllegalArgumentException("Glob pattern matched no files: " + path);
         }
 
-        // Declared mapping is the whole schema, in LOGICAL names; a `source` rename is applied at the reader, so the
+        // Declared mapping is the whole schema, in LOGICAL names; a `path` rename is applied at the reader, so the
         // operator (and file schema) work purely in logical names.
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
-        Object formatOverride = config.get(FileSourceFactory.CONFIG_FORMAT);
-        String sourceType = formatOverride != null ? String.valueOf(formatOverride) : FormatNameResolver.resolve(config, path);
+        // Same reader-then-format-then-extension dispatch as the single-file strict path above.
+        String sourceType = FormatNameResolver.resolve(config, path);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config
         );
         extMetadata = enrichWithFileCount(extMetadata, listing.fileCount());
+
+        // Partition columns are path-derived (no file I/O), so strict mode surfaces them exactly like the inferred
+        // path does. One divergence: the inferred path SHADOWS a physical column that collides with a partition key
+        // (partition wins, Spark/DuckDB semantics), but under strict the declaration drives the reader's file schema
+        // — text formats bind positionally — so silently dropping a declared column would silently re-bind the rest.
+        // A declared column colliding with a partition key is rejected instead: partition columns need no declaring.
+        PartitionMetadata partitionMetadata = listing.partitionMetadata();
+        if (partitionMetadata != null && partitionMetadata.isEmpty() == false) {
+            for (Attribute declared : logicalSchema) {
+                if (partitionMetadata.partitionColumns().containsKey(declared.name())) {
+                    throw new IllegalArgumentException(
+                        "declared column ["
+                            + declared.name()
+                            + "] collides with a partition column derived from the path; partition columns are "
+                            + "path-derived and must not be declared under [properties]"
+                    );
+                }
+            }
+            extMetadata = enrichSchemaWithPartitionColumns(extMetadata, partitionMetadata);
+        }
 
         Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap = new HashMap<>();
         for (int i = 0; i < listing.fileCount(); i++) {
@@ -1487,6 +1507,15 @@ public class ExternalSourceResolver {
                 // ExternalSourceMetadata instances that already carry config (e.g. Iceberg),
                 // their factory is responsible for populating sourceMetadata() — statistics()
                 // is typically empty so there is nothing extra to embed.
+                //
+                // This early return does NOT merge queryConfig — so resolver-derived declared-mapping keys
+                // (renames, _id.path) would silently vanish on this rail. Until this rail supports them,
+                // reject loudly rather than ignore a mapping the user declared.
+                if (queryConfig != null && DERIVED_CONFIG_KEYS.stream().anyMatch(queryConfig::containsKey)) {
+                    throw new IllegalArgumentException(
+                        "declared mappings with [path] renames or [_id.path] are not supported for this source type"
+                    );
+                }
                 return extMetadata;
             }
         }

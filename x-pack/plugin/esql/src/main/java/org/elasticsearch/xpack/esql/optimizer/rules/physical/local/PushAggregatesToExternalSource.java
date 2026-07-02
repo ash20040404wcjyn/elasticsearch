@@ -203,7 +203,7 @@ public class PushAggregatesToExternalSource extends PhysicalOptimizerRules.Param
      * correct fall-back signals, the rule does not pushdown.
      */
     // Split stats are keyed by the name the format emitted them under (physical, for the columnar formats), so a
-    // declared `source` rename must resolve the physical name before the lookup. A 1:1 rename cannot collide, so this
+    // declared `path` rename must resolve the physical name before the lookup. A 1:1 rename cannot collide, so this
     // never returns a wrong stat; a mismatch merely declines the pushdown (correct fall-back).
     private Object resolveFromStats(
         Expression aggFunction,

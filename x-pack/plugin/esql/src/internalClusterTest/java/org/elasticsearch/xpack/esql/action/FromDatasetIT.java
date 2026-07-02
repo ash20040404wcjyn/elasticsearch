@@ -187,7 +187,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "employees_copy_collide",
         "employees_copy_multi",
         "employees_swap",
-        "employees_id_from_col"
+        "employees_id_from_col",
+        "employees_id_bad_path"
     );
 
     /**
@@ -1742,6 +1743,43 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             assertThat(rows.get(0).get(1).toString(), equalTo("Alice"));
             assertThat(rows.get(2).get(0), equalTo(3));
             assertThat(rows.get(2).get(1).toString(), equalTo("Carol"));
+        }
+    }
+
+    public void testIdFromMissingColumnRejectedOnlyWhenIdRequested() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        // Non-strict declaration whose _id.path names a column that exists in NO file — a typo, or the files lost it.
+        // PUT accepts it (non-strict defers the existence check to query time; the files may not exist yet at PUT).
+        DatasetMapping mapping = new DatasetMapping(
+            new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, new java.util.LinkedHashMap<>(), null, "no_such_column")
+        );
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "employees_id_bad_path",
+                    "local_ds",
+                    csvFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+
+        // Asking for _id fails loudly at analysis — never a silently-null id column.
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM employees_id_bad_path METADATA _id | KEEP _id, emp_no | LIMIT 5"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("no_such_column"));
+        assertThat(e.getMessage(), containsString("_id"));
+
+        // Not asking for _id is moot — the bad _id.path is like any other unread column; the query works.
+        try (var response = run(syncEsqlQueryRequest("FROM employees_id_bad_path | SORT emp_no | LIMIT 5"), TIMEOUT)) {
+            assertThat(getValuesList(response), hasSize(3));
         }
     }
 

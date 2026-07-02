@@ -151,6 +151,10 @@ public class PutDatasetAction extends ActionType<AcknowledgedResponse> {
             out.writeGenericMap(rawSettings);
             if (out.getTransportVersion().supports(DATASET_DECLARED_SCHEMA)) {
                 out.writeOptionalWriteable(mapping);
+            } else if (mapping != null) {
+                // Reject rather than silently dropping the mapping toward an older master: an acked PUT whose
+                // declared schema evaporated is worse than a failed one (same pattern as RestGetSnapshotsAction).
+                throw new IllegalArgumentException("[mappings] is not supported on all nodes in the cluster; retry after the upgrade");
             }
         }
 

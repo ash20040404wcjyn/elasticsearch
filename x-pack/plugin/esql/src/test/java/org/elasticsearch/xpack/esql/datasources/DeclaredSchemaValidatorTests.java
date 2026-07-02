@@ -131,4 +131,56 @@ public class DeclaredSchemaValidatorTests extends ESTestCase {
         // query-time resolution. (The id-source is a meta-field inside mappings, so it always rides a mappings wrapper.)
         DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, Map.of(), null, "row_id")));
     }
+
+    public void testStrictWithNoPropertiesRejected() {
+        // dynamic:false means "the declaration IS the schema" — no properties, no schema; the zero-column relation
+        // downstream is not a queryable thing, so PUT rejects the shape outright.
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.FALSE, Map.of())))
+        );
+        assertTrue(e.getMessage(), e.getMessage().contains("at least one declared column"));
+    }
+
+    public void testBlankNamesRejected() {
+        // Index-mapping precedent: field names must be non-empty. Blank property key / path / copy_to / _id.path all reject.
+        Map<String, DatasetFieldMapping> blankKey = new LinkedHashMap<>();
+        blankKey.put(" ", new DatasetFieldMapping("keyword", null));
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, blankKey)))
+        );
+
+        Map<String, DatasetFieldMapping> blankPath = new LinkedHashMap<>();
+        blankPath.put("a", new DatasetFieldMapping("keyword", ""));
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, blankPath)))
+        );
+
+        Map<String, DatasetFieldMapping> blankCopyTo = new LinkedHashMap<>();
+        blankCopyTo.put("a", new DatasetFieldMapping("keyword", null, ""));
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, blankCopyTo)))
+        );
+
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, Map.of(), null, " ")))
+        );
+    }
+
+    public void testIdPathReferencingCopyToTargetRejected() {
+        // A copy_to target is a projection above the read, not a stored column — the reader has nothing to stamp _id
+        // from, so pointing _id.path at one would silently produce null ids. Rejected at PUT.
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("user_id", new DatasetFieldMapping("keyword", null, "actor"));
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, props, null, "actor")))
+        );
+        assertTrue(e.getMessage(), e.getMessage().contains("copy_to target"));
+        assertTrue(e.getMessage(), e.getMessage().contains("actor"));
+    }
 }

@@ -290,7 +290,7 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         var effectiveStats = SplitStats.resolveEffectiveStats(externalExec.splits(), externalExec.sourceMetadata());
         pushableCandidates = FilterEvaluationOrderEstimator.orderByEstimatedCost(pushableCandidates, effectiveStats);
 
-        // A declared `source` rename lives in logical space in the plan, but the opaque per-format predicate the SPI
+        // A declared `path` rename lives in logical space in the plan, but the opaque per-format predicate the SPI
         // mints must reference the file's PHYSICAL columns. Physicalize only the conjuncts handed to the mint; map the
         // returned pushed/remainder expressions back to logical (via inverse, NameId-preserving) so the plan's FilterExec
         // and reconciliation stay logical. No-op when the dataset declares no rename.

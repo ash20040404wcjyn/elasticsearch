@@ -327,7 +327,7 @@ final class FileSourceFactory implements ExternalSourceFactory {
                 // came from inline EXTERNAL (no dataset mapping), populated when it came from
                 // FROM <dataset>.
                 .datasetName(context.datasetName())
-                // Declared source renames, applied to reader-facing names (projection + read schema) at the last mile.
+                // Declared `path` renames, applied to reader-facing names (projection + read schema) at the last mile.
                 .renames(PhysicalNames.fromConfig(config))
                 // Declared _id.path (logical column name): stamps _id from that column instead of the synthetic id.
                 .idPath(idPathFromConfig(config))
