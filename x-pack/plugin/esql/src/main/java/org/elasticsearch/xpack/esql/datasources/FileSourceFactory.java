@@ -30,6 +30,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.StorageProvider;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -266,7 +267,10 @@ final class FileSourceFactory implements ExternalSourceFactory {
 
             FormatReader format = resolveFormatReader(path.objectName(), config).withConfig(config)
                 .withPushedFilter(context.pushedFilter())
-                .withSchema(context.attributes());
+                .withSchema(context.attributes())
+                // Declared per-column date formats: the spec keys them by logical name, but the reader sees physical
+                // (file) column names, so physicalize the keys through the same `path` renames here at the last mile.
+                .withDeclaredDateFormats(physicalDateFormats(context.declaredReadSpec()));
             ErrorPolicy errorPolicy = resolveErrorPolicy(config, format);
 
             Map<String, Object> partitionValues = Map.of();
@@ -355,6 +359,24 @@ final class FileSourceFactory implements ExternalSourceFactory {
             return null;
         }
         return fileList.lastModifiedMillis(0);
+    }
+
+    /**
+     * Re-keys the spec's declared date formats from logical to physical (file) column names, applying the declared
+     * {@code path} renames — a column read as physical name {@code p} carries the format declared on its logical name.
+     * The text readers key their per-column formatters by the physical names they actually see. Empty in, empty out.
+     */
+    private static Map<String, String> physicalDateFormats(DeclaredReadSpec spec) {
+        Map<String, String> logical = spec.dateFormats();
+        if (logical.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> renames = spec.renames();
+        Map<String, String> physical = new HashMap<>(logical.size());
+        for (Map.Entry<String, String> e : logical.entrySet()) {
+            physical.put(renames.getOrDefault(e.getKey(), e.getKey()), e.getValue());
+        }
+        return physical;
     }
 
     /** Delegates to {@link ErrorPolicy#fromConfig(Map, ErrorPolicy)} with the format's default

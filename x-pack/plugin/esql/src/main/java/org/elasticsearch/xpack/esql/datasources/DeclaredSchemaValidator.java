@@ -134,9 +134,11 @@ public final class DeclaredSchemaValidator {
 
     /**
      * A declared {@code format} is a date-parse pattern, so it is only accepted on a column whose type resolves to
-     * {@code datetime} ({@code date_nanos} is not a declarable type). The pattern itself is validated here with the
-     * same ES {@link DateFormatter#forPattern} the readers use, so a bad pattern fails the PUT rather than the first
-     * query — and PUT-accepted implies read-parseable (increment 3 parses with the same formatter class).
+     * {@code datetime} ({@code date_nanos} is not a declarable type). The pattern is validated here with the ES
+     * {@link DateFormatter#forPattern} — the same class the text readers use to parse a <b>declared</b> date column
+     * (CSV/TSV via a per-column {@code DateFormatter}, NDJSON likewise), so a bad pattern fails the PUT rather than the
+     * first query and a PUT-accepted pattern is read-parseable. (The readers' <em>file-level</em> {@code datetime_format}
+     * on CSV uses a JDK formatter; that is a separate, unaffected path.)
      */
     private static void validateFormat(String column, String type, String format) {
         if (format == null) {

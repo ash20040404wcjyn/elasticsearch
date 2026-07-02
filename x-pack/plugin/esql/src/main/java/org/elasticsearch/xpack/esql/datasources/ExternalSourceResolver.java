@@ -8,6 +8,7 @@ package org.elasticsearch.xpack.esql.datasources;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.cluster.metadata.DatasetFieldMapping;
 import org.elasticsearch.cluster.metadata.DatasetMapping;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.Maps;
@@ -443,14 +444,27 @@ public class ExternalSourceResolver {
 
     /**
      * The typed read-instructions a declared mapping produces for the data node: the logical&rarr;physical column
-     * renames of a {@code path} move plus the declared {@code _id.path}. {@link DeclaredReadSpec#NONE} when there is no
-     * mapping or it declares neither. Built once per path in {@link #resolve} and carried on the {@code ResolvedSource}.
+     * renames of a {@code path} move, the declared {@code _id.path}, and per-column date parse-patterns (keyed by
+     * logical column name). {@link DeclaredReadSpec#NONE} when there is no mapping or it declares none of these. Built
+     * once per path in {@link #resolve} and carried on the {@code ResolvedSource}.
      */
     private static DeclaredReadSpec declaredReadSpecOf(@Nullable DatasetMapping declaredMapping) {
         Map<String, String> renames = DeclaredSchemaResolver.renameMap(declaredMapping);
         DatasetMapping.Mappings mappings = declaredMapping == null ? null : declaredMapping.mappings();
         String idPath = mappings == null ? null : mappings.idPath();
-        return DeclaredReadSpec.of(renames, idPath);
+        Map<String, String> dateFormats = Map.of();
+        if (mappings != null) {
+            Map<String, String> collected = new HashMap<>();
+            for (Map.Entry<String, DatasetFieldMapping> e : mappings.properties().entrySet()) {
+                String format = e.getValue().format();
+                if (format != null) {
+                    // Keyed by the LOGICAL column name; FileSourceFactory physicalizes the keys via renames.
+                    collected.put(e.getKey(), format);
+                }
+            }
+            dateFormats = collected;
+        }
+        return DeclaredReadSpec.of(renames, idPath, dateFormats);
     }
 
     /**
@@ -598,9 +612,18 @@ public class ExternalSourceResolver {
         for (Attribute a : inferred.schema()) {
             inferredTypes.put(a.name(), a.dataType());
         }
-        for (Map.Entry<String, org.elasticsearch.cluster.metadata.DatasetFieldMapping> e : declaredMapping.mappings()
-            .properties()
-            .entrySet()) {
+        for (Map.Entry<String, DatasetFieldMapping> e : declaredMapping.mappings().properties().entrySet()) {
+            // A declared date `format` is a text-parse pattern; columnar formats carry native typed values and never
+            // text-parse, so a format here is meaningless — reject it loudly rather than silently ignore it.
+            if (e.getValue().format() != null) {
+                throw new IllegalArgumentException(
+                    "[format] on column ["
+                        + e.getKey()
+                        + "] is not supported for ["
+                        + inferred.sourceType()
+                        + "] datasets; columns carry their own native type"
+                );
+            }
             String physical = e.getValue().path() != null ? e.getValue().path() : e.getKey();
             DataType inferredType = inferredTypes.get(physical);
             if (inferredType == null) {

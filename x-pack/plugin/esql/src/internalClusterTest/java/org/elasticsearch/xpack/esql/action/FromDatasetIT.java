@@ -82,6 +82,14 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
     private Path csvFixture;
     private Path csvFixtureAlt;
     private Path ndjsonFixture;
+    private Path csvDateFixture;
+    private Path ndjsonDateFixture;
+
+    // 10/Oct/2000:13:55:36 -0700 == 2000-10-10T20:55:36Z. The literal epoch pins the zone-aware parse: a formatter that
+    // discarded the -0700 offset would land at 13:55:36Z (971204136000), 7h earlier — the exact zone-dropping bug the
+    // declared-format read path must not have.
+    private static final long ACCESS_LOG_EPOCH_MILLIS = 971211336000L;
+    private static final String ACCESS_LOG_FORMAT = "dd/MMM/yyyy:HH:mm:ss Z";
 
     /** Minimal pass-through validator registered for type {@code test}; accepts any resource scheme. */
     public static final class TestDataSourcePlugin extends Plugin implements DataSourcePlugin {
@@ -154,6 +162,22 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 "{\"emp_no\":1,\"first_name\":\"Alice\"}",
                 "{\"emp_no\":2,\"first_name\":\"Bob\"}",
                 "{\"emp_no\":3,\"first_name\":\"Carol\"}"
+            ) + "\n"
+        );
+        // Access-log-style timestamps carrying an explicit -0700 zone; the physical column is text (keyword) and a
+        // declared `date` + `format` reparses it. `note` stays a plain keyword.
+        csvDateFixture = createTempFile("dataset-date-fixture-", ".csv");
+        Files.writeString(
+            csvDateFixture,
+            String.join("\n", "ts:keyword,note:keyword", "10/Oct/2000:13:55:36 -0700,alpha", "11/Oct/2000:09:00:00 -0700,beta") + "\n"
+        );
+        ndjsonDateFixture = createTempFile("dataset-date-fixture-", ".ndjson");
+        Files.writeString(
+            ndjsonDateFixture,
+            String.join(
+                "\n",
+                "{\"ts\":\"10/Oct/2000:13:55:36 -0700\",\"note\":\"alpha\"}",
+                "{\"ts\":\"11/Oct/2000:09:00:00 -0700\",\"note\":\"beta\"}"
             ) + "\n"
         );
     }
@@ -499,6 +523,204 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             assertThat(rows, hasSize(3));
             assertThat(rows.get(0).get(0), equalTo(1L));
             assertThat(rows.get(2).get(0), equalTo(3L));
+        }
+    }
+
+    public void testDeclaredDateFormatCsvStrictParsesZoneAware() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // Strict declaration: `ts` is a date parsed with the access-log pattern (which carries an explicit zone).
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        properties.put("note", new DatasetFieldMapping("keyword", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_strict",
+                    "local_ds",
+                    csvDateFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+
+        // ts::long is the parsed epoch-millis; SORT ts ASC puts the 10/Oct/2000:13:55:36 -0700 row first. The exact
+        // literal proves the -0700 offset was honored (a zone-dropping parse would be 7h off).
+        try (var response = run(syncEsqlQueryRequest("FROM logs_csv_strict | SORT ts | EVAL ms = ts::long | KEEP ms | LIMIT 1"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows, hasSize(1));
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
+        }
+    }
+
+    public void testDeclaredDateFormatCsvNonStrictDateMath() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // Non-strict overlay retypes the inferred keyword `ts` to a date with the declared format; date comparison then
+        // works on the parsed instants. Only the 11/Oct row (2000-10-11T16:00:00Z) is >= the 2000-10-11T00:00:00Z bound.
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_nonstrict",
+                    "local_ds",
+                    csvDateFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+
+        try (
+            var response = run(
+                syncEsqlQueryRequest("FROM logs_csv_nonstrict | WHERE ts >= \"2000-10-11T00:00:00Z\"::datetime | STATS c = COUNT(*)"),
+                TIMEOUT
+            )
+        ) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(1L));
+        }
+    }
+
+    public void testDeclaredDateFormatWinsOverFileLevelDatetimeFormat() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // File-level datetime_format is a pattern that CANNOT parse the access-log text; the column's own declared
+        // format must win for that column, so the value still parses to the exact zone-aware epoch.
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        properties.put("note", new DatasetFieldMapping("keyword", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_filelevel",
+                    "local_ds",
+                    csvDateFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv", "datetime_format", "yyyy-MM-dd")),
+                    mapping
+                )
+            )
+        );
+
+        try (
+            var response = run(syncEsqlQueryRequest("FROM logs_csv_filelevel | SORT ts | EVAL ms = ts::long | KEEP ms | LIMIT 1"), TIMEOUT)
+        ) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
+        }
+    }
+
+    public void testNoDeclaredFormatDateColumnParsesIso() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // Regression: a declared date column with NO format keeps the ISO/default parse path unchanged.
+        Path isoFixture = createTempFile("dataset-iso-fixture-", ".csv");
+        Files.writeString(isoFixture, String.join("\n", "ts:keyword", "2000-10-10T20:55:36Z") + "\n");
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_iso",
+                    "local_ds",
+                    isoFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+
+        try (var response = run(syncEsqlQueryRequest("FROM logs_csv_iso | EVAL ms = ts::long | KEEP ms | LIMIT 1"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
+        }
+    }
+
+    public void testDeclaredDateFormatOnParquetRejected() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // A declared date `format` is a text-parse pattern; columnar formats carry native typed values, so it is
+        // rejected loudly at query resolution rather than silently ignored.
+        Path parquet = writeParquetRenameFixture();
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", "emp_no", List.of(), ACCESS_LOG_FORMAT));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_parquet_format",
+                    "local_ds",
+                    parquet.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "parquet")),
+                    mapping
+                )
+            )
+        );
+
+        Exception e = expectThrows(Exception.class, () -> run(syncEsqlQueryRequest("FROM logs_parquet_format | LIMIT 5"), TIMEOUT).close());
+        assertThat(e.getMessage(), containsString("[format] on column [ts]"));
+        assertThat(e.getMessage(), containsString("parquet"));
+    }
+
+    public void testDeclaredDateFormatNdjsonParsesZoneAware() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // NDJSON already parses dates via the ES DateFormatter; a per-column declared format reparses that column with
+        // its own pattern (same zone-aware semantics).
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_ndjson",
+                    "local_ds",
+                    ndjsonDateFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "ndjson")),
+                    mapping
+                )
+            )
+        );
+
+        try (var response = run(syncEsqlQueryRequest("FROM logs_ndjson | SORT ts | EVAL ms = ts::long | KEEP ms | LIMIT 1"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
         }
     }
 

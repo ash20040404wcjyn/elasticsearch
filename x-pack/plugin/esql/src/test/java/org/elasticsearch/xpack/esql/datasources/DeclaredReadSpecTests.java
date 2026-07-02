@@ -25,7 +25,12 @@ public class DeclaredReadSpecTests extends AbstractWireSerializingTestCase<Decla
             renames.put(randomAlphaOfLength(4) + i, randomAlphaOfLength(5));
         }
         String idPath = randomBoolean() ? randomAlphaOfLength(4) : null;
-        return DeclaredReadSpec.of(renames, idPath);
+        Map<String, String> dateFormats = new HashMap<>();
+        int formatCount = between(0, 2);
+        for (int i = 0; i < formatCount; i++) {
+            dateFormats.put("ts" + i, randomFrom("epoch_millis", "yyyy-MM-dd", "dd/MMM/yyyy:HH:mm:ss Z"));
+        }
+        return DeclaredReadSpec.of(renames, idPath, dateFormats);
     }
 
     @Override
@@ -42,12 +47,13 @@ public class DeclaredReadSpecTests extends AbstractWireSerializingTestCase<Decla
     protected DeclaredReadSpec mutateInstance(DeclaredReadSpec instance) throws IOException {
         Map<String, String> renames = new HashMap<>(instance.renames());
         String idPath = instance.idPath();
-        if (randomBoolean()) {
-            renames.put(randomAlphaOfLength(6), randomAlphaOfLength(6));
-        } else {
-            idPath = randomValueOtherThan(idPath, () -> randomBoolean() ? randomAlphaOfLength(5) : null);
+        Map<String, String> dateFormats = new HashMap<>(instance.dateFormats());
+        switch (between(0, 2)) {
+            case 0 -> renames.put(randomAlphaOfLength(6), randomAlphaOfLength(6));
+            case 1 -> idPath = randomValueOtherThan(idPath, () -> randomBoolean() ? randomAlphaOfLength(5) : null);
+            default -> dateFormats.put(randomAlphaOfLength(6), randomFrom("epoch_millis", "yyyy-MM-dd"));
         }
-        return DeclaredReadSpec.of(renames, idPath);
+        return DeclaredReadSpec.of(renames, idPath, dateFormats);
     }
 
     public void testNoneIsEmpty() {

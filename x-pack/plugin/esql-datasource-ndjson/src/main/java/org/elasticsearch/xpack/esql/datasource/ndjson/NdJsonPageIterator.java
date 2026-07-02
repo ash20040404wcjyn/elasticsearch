@@ -104,7 +104,8 @@ final class NdJsonPageIterator extends BufferingPageIterator {
         NdJsonReaderCounters counters,
         long splitStartByte,
         int maxRecordBytes,
-        DateFormatter datetimeFormatter
+        DateFormatter datetimeFormatter,
+        Map<String, String> declaredDateFormats
     ) throws IOException {
         Check.isTrue(errorPolicy != null, "errorPolicy must not be null");
         Check.isTrue(counters != null, "counters must not be null");
@@ -154,7 +155,8 @@ final class NdJsonPageIterator extends BufferingPageIterator {
                 blockFactory,
                 errorPolicy,
                 this.sourceLocation,
-                counters
+                counters,
+                declaredDateFormats
             );
         } else {
             // Streaming/fallback path (object too large for the fast path, unknown length, or a
@@ -174,7 +176,8 @@ final class NdJsonPageIterator extends BufferingPageIterator {
                 blockFactory,
                 errorPolicy,
                 this.sourceLocation,
-                counters
+                counters,
+                declaredDateFormats
             );
         }
         this.pageDecoder.setRecordOffsetBase(recordOffsetBase);

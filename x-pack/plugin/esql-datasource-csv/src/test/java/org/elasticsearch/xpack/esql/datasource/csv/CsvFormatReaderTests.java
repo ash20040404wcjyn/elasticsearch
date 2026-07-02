@@ -439,6 +439,22 @@ public class CsvFormatReaderTests extends ESTestCase {
         }
     }
 
+    public void testReadDeclaredDateFormatZoneAware() throws IOException {
+        // A per-column declared format parses this column's text with the ES DateFormatter (zone-aware): the -0700 offset
+        // is honored, so 10/Oct/2000:13:55:36 -0700 lands at 2000-10-10T20:55:36Z, NOT 13:55:36Z. A no-declared-format
+        // column keeps today's behavior; here `ts` is the only column and it carries a declared format.
+        String csv = "ts:datetime\n10/Oct/2000:13:55:36 -0700\n";
+        StorageObject object = createStorageObject(csv);
+        CsvFormatReader reader = new CsvFormatReader(blockFactory).withDeclaredDateFormats(Map.of("ts", "dd/MMM/yyyy:HH:mm:ss Z"));
+
+        try (CloseableIterator<Page> iterator = reader.read(object, null, 10)) {
+            assertTrue(iterator.hasNext());
+            Page page = iterator.next();
+            assertEquals(1, page.getPositionCount());
+            assertEquals(971211336000L, ((LongBlock) page.getBlock(0)).getLong(0));
+        }
+    }
+
     public void testReadDatetimeMixed() throws IOException {
         long epochMillis = 1609459200000L; // 2021-01-01T00:00:00.000Z
         String csv = "id:long,ts:datetime\n1," + epochMillis + "\n2,1953-09-02T00:00:00.000Z\n";

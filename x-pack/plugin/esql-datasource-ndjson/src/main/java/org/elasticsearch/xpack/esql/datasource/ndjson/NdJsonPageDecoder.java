@@ -175,6 +175,12 @@ public class NdJsonPageDecoder implements Closeable {
     private long totalRowCount;
     private long errorCount;
     private final DateFormatter datetimeFormatter;
+    /**
+     * Per-column declared date parse-patterns keyed by <b>physical</b> (file) column name; empty when none. Each
+     * {@link BlockDecoder} resolves its own {@link DateFormatter} once from this map in {@link BlockDecoder#setAttribute}
+     * and parses that column's timestamps with it instead of {@link #datetimeFormatter}.
+     */
+    private final Map<String, String> declaredDateFormats;
 
     /** Number of malformed records observed during decoding (lenient policies swallow these). */
     long errorCount() {
@@ -199,6 +205,7 @@ public class NdJsonPageDecoder implements Closeable {
      */
     private final BytesRef keywordScratch = new BytesRef(BytesRef.EMPTY_BYTES);
 
+    /** No-declared-date-formats convenience (tests and callers that declare no per-column {@code format}). */
     NdJsonPageDecoder(
         InputStream input,
         DateFormatter datetimeFormatter,
@@ -209,6 +216,32 @@ public class NdJsonPageDecoder implements Closeable {
         ErrorPolicy errorPolicy,
         String sourceLocation,
         NdJsonReaderCounters counters
+    ) throws IOException {
+        this(
+            input,
+            datetimeFormatter,
+            attributes,
+            projectedColumns,
+            batchSize,
+            blockFactory,
+            errorPolicy,
+            sourceLocation,
+            counters,
+            Map.of()
+        );
+    }
+
+    NdJsonPageDecoder(
+        InputStream input,
+        DateFormatter datetimeFormatter,
+        List<Attribute> attributes,
+        List<String> projectedColumns,
+        int batchSize,
+        BlockFactory blockFactory,
+        ErrorPolicy errorPolicy,
+        String sourceLocation,
+        NdJsonReaderCounters counters,
+        Map<String, String> declaredDateFormats
     ) throws IOException {
         this(
             input,
@@ -223,7 +256,8 @@ public class NdJsonPageDecoder implements Closeable {
             sourceLocation,
             datetimeFormatter,
             counters,
-            NdJsonUtils.JSON_FACTORY
+            NdJsonUtils.JSON_FACTORY,
+            declaredDateFormats
         );
     }
 
@@ -233,6 +267,7 @@ public class NdJsonPageDecoder implements Closeable {
      * (no buffered-bytes shuttling through {@link NdJsonUtils#moveToNextLine}) by scanning for the
      * next {@code '\n'} from the parser's current byte offset.
      */
+    /** No-declared-date-formats convenience for the byte[] path. */
     NdJsonPageDecoder(
         byte[] data,
         int offset,
@@ -247,6 +282,36 @@ public class NdJsonPageDecoder implements Closeable {
         NdJsonReaderCounters counters
     ) throws IOException {
         this(
+            data,
+            offset,
+            length,
+            datetimeFormatter,
+            attributes,
+            projectedColumns,
+            batchSize,
+            blockFactory,
+            errorPolicy,
+            sourceLocation,
+            counters,
+            Map.of()
+        );
+    }
+
+    NdJsonPageDecoder(
+        byte[] data,
+        int offset,
+        int length,
+        DateFormatter datetimeFormatter,
+        List<Attribute> attributes,
+        List<String> projectedColumns,
+        int batchSize,
+        BlockFactory blockFactory,
+        ErrorPolicy errorPolicy,
+        String sourceLocation,
+        NdJsonReaderCounters counters,
+        Map<String, String> declaredDateFormats
+    ) throws IOException {
+        this(
             null,
             data,
             offset,
@@ -259,7 +324,8 @@ public class NdJsonPageDecoder implements Closeable {
             sourceLocation,
             datetimeFormatter,
             counters,
-            NdJsonUtils.JSON_FACTORY
+            NdJsonUtils.JSON_FACTORY,
+            declaredDateFormats
         );
     }
 
@@ -291,7 +357,8 @@ public class NdJsonPageDecoder implements Closeable {
             sourceLocation,
             null,
             new NdJsonReaderCounters(),
-            factory
+            factory,
+            Map.of()
         );
     }
 
@@ -308,7 +375,8 @@ public class NdJsonPageDecoder implements Closeable {
         String sourceLocation,
         DateFormatter datetimeFormatter,
         NdJsonReaderCounters counters,
-        JsonFactory factory
+        JsonFactory factory,
+        Map<String, String> declaredDateFormats
     ) throws IOException {
         this.jsonFactory = factory;
         this.input = input;
@@ -335,6 +403,7 @@ public class NdJsonPageDecoder implements Closeable {
         this.errorPolicy = errorPolicy;
         this.counters = counters;
         this.datetimeFormatter = datetimeFormatter != null ? datetimeFormatter : NdJsonSchemaInferrer.STRICT_DATE_OPTIONAL_TIME;
+        this.declaredDateFormats = declaredDateFormats != null ? Map.copyOf(declaredDateFormats) : Map.of();
         this.skipWarnings = SkipWarnings.of(
             errorPolicy,
             "NDJSON read from ["
@@ -923,6 +992,9 @@ public class NdJsonPageDecoder implements Closeable {
         String name;
         int blockIdx;
         Block.Builder blockBuilder;
+        /** Declared date parser for this column, or {@code null} to use the file-level {@link #datetimeFormatter}. */
+        @Nullable
+        DateFormatter declaredFormatter;
         Map<String, BlockDecoder> children;
         /**
          * Identity-keyed cache of field-name {@link String} instances previously seen by this
@@ -945,6 +1017,10 @@ public class NdJsonPageDecoder implements Closeable {
             this.dataType = attribute.dataType();
             this.name = attribute.name();
             this.blockIdx = blockIdx;
+            // Resolve the declared date formatter ONCE (prepareSchema runs once per decoder), keyed by the column's
+            // physical (file) name — the same key space FileSourceFactory physicalized declaredDateFormats into.
+            String pattern = declaredDateFormats.get(attribute.name());
+            this.declaredFormatter = pattern != null ? DateFormatter.forPattern(pattern) : null;
         }
 
         // Builders setup independently as we need to create new ones for each page.
@@ -1247,7 +1323,11 @@ public class NdJsonPageDecoder implements Closeable {
                 }
                 case DATETIME -> {
                     try {
-                        var millis = datetimeFormatter.parseMillis(parser.getValueAsString());
+                        // A column with a declared `format` parses with its own ES DateFormatter (zone-aware, same as
+                        // the file-level one); otherwise the file-level datetimeFormatter. Malformed values follow the
+                        // existing unexpectedValue (append-null + debug-log) channel unchanged.
+                        DateFormatter formatter = declaredFormatter != null ? declaredFormatter : datetimeFormatter;
+                        var millis = formatter.parseMillis(parser.getValueAsString());
                         ((LongBlock.Builder) blockBuilder).appendLong(millis);
                     } catch (Exception e) {
                         unexpectedValue(blockBuilder, parser, inArray);

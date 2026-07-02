@@ -230,6 +230,23 @@ public interface FormatReader extends Closeable {
     }
 
     /**
+     * Returns a format reader that parses the given columns' dates with the given patterns instead of the ISO default
+     * / file-level {@code datetime_format}. Keyed by <b>physical</b> (file) column name — the caller
+     * ({@code FileSourceFactory}) has already applied any declared {@code path} rename. The patterns are ES
+     * {@code DateFormatter} patterns (named formats and {@code ||} chains included), matching the dataset-put validation.
+     * <p>
+     * Only the text formats (CSV/TSV, NDJSON) parse dates from text and override this. Columnar formats (Parquet, ORC)
+     * carry native typed values and keep the no-op default — a declared {@code format} on a columnar column is rejected
+     * upstream at query resolution, so it never reaches here.
+     *
+     * @param physicalNameToPattern per-column date patterns keyed by physical column name; empty for no declared formats
+     * @return a new reader applying the per-column formats, or {@code this} when none apply
+     */
+    default FormatReader withDeclaredDateFormats(Map<String, String> physicalNameToPattern) {
+        return this;
+    }
+
+    /**
      * Returns the filter pushdown support for this format, or null if not supported.
      * <p>
      * When non-null, the optimizer can translate ESQL filter expressions into format-specific

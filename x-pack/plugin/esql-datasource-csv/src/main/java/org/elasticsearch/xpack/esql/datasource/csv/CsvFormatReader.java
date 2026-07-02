@@ -397,6 +397,13 @@ public class CsvFormatReader implements SegmentableFormatReader {
      * short-circuit in any real (coordinator != data node) cluster. Empty until {@link #withConfig} runs.
      */
     private final String canonicalConfig;
+    /**
+     * Per-column declared date parse-patterns, keyed by <b>physical</b> (file) column name (the caller applied any
+     * {@code path} rename). Set via {@link #withDeclaredDateFormats}; empty when no column declares a {@code format}.
+     * A {@link CsvBatchIterator} turns this into a per-projected-column {@link DateFormatter} array and parses those
+     * columns' timestamps with the ES {@link DateFormatter} (zone-aware) instead of the ISO / file-level path.
+     */
+    private final Map<String, String> declaredDateFormats;
 
     public CsvFormatReader(BlockFactory blockFactory) {
         this(
@@ -407,7 +414,8 @@ public class CsvFormatReader implements SegmentableFormatReader {
             null,
             CsvSchemaInferrer.DEFAULT_SAMPLE_SIZE,
             ErrorPolicy.STRICT,
-            ""
+            "",
+            Map.of()
         );
     }
 
@@ -420,12 +428,13 @@ public class CsvFormatReader implements SegmentableFormatReader {
             null,
             CsvSchemaInferrer.DEFAULT_SAMPLE_SIZE,
             ErrorPolicy.STRICT,
-            ""
+            "",
+            Map.of()
         );
     }
 
     public CsvFormatReader(BlockFactory blockFactory, CsvFormatOptions options, String format, List<String> extensions) {
-        this(blockFactory, options, format, extensions, null, CsvSchemaInferrer.DEFAULT_SAMPLE_SIZE, ErrorPolicy.STRICT, "");
+        this(blockFactory, options, format, extensions, null, CsvSchemaInferrer.DEFAULT_SAMPLE_SIZE, ErrorPolicy.STRICT, "", Map.of());
     }
 
     private CsvFormatReader(
@@ -436,7 +445,8 @@ public class CsvFormatReader implements SegmentableFormatReader {
         List<Attribute> resolvedSchema,
         int schemaSampleSize,
         ErrorPolicy effectivePolicy,
-        String canonicalConfig
+        String canonicalConfig,
+        Map<String, String> declaredDateFormats
     ) {
         this.blockFactory = blockFactory;
         this.options = options;
@@ -446,6 +456,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
         this.schemaSampleSize = schemaSampleSize;
         this.effectivePolicy = effectivePolicy;
         this.canonicalConfig = canonicalConfig;
+        this.declaredDateFormats = declaredDateFormats != null ? Map.copyOf(declaredDateFormats) : Map.of();
         this.counters = new CsvReaderCounters(format);
         this.sharedCsvMapper = createMapper(options);
     }
@@ -697,13 +708,42 @@ public class CsvFormatReader implements SegmentableFormatReader {
             resolvedSchema,
             schemaSampleSize,
             effectivePolicy,
-            canonicalConfig
+            canonicalConfig,
+            declaredDateFormats
         );
     }
 
     @Override
     public CsvFormatReader withSchema(List<Attribute> schema) {
-        return new CsvFormatReader(blockFactory, options, format, extensions, schema, schemaSampleSize, effectivePolicy, canonicalConfig);
+        return new CsvFormatReader(
+            blockFactory,
+            options,
+            format,
+            extensions,
+            schema,
+            schemaSampleSize,
+            effectivePolicy,
+            canonicalConfig,
+            declaredDateFormats
+        );
+    }
+
+    @Override
+    public CsvFormatReader withDeclaredDateFormats(Map<String, String> physicalNameToPattern) {
+        if (physicalNameToPattern == null || physicalNameToPattern.isEmpty()) {
+            return this;
+        }
+        return new CsvFormatReader(
+            blockFactory,
+            options,
+            format,
+            extensions,
+            resolvedSchema,
+            schemaSampleSize,
+            effectivePolicy,
+            canonicalConfig,
+            physicalNameToPattern
+        );
     }
 
     @Override
@@ -728,7 +768,8 @@ public class CsvFormatReader implements SegmentableFormatReader {
             result.resolvedSchema,
             newSampleSize,
             resolvedPolicy,
-            canon
+            canon,
+            result.declaredDateFormats
         );
         return Configured.fromKnownSubset(result, config, RECOGNIZED_KEYS);
     }
@@ -1935,6 +1976,12 @@ public class CsvFormatReader implements SegmentableFormatReader {
         private DataType[] projectedTypes;
         private Attribute[] projectedAttrs;
         /**
+         * Per-projected-column declared date formatter, or {@code null} for a column with no declared {@code format}.
+         * {@code null} array when no column declares one. Resolved ONCE in {@link #initProjection} (never per row) from
+         * the reader's physical-keyed {@code declaredDateFormats}, aligned to {@link #projectedAttrs}.
+         */
+        private DateFormatter[] declaredFormatters;
+        /**
          * Projection slots backed by a {@code KEYWORD}/{@code TEXT} source column: the only columns
          * that receive a byte-size hint when building blocks (see {@link #convertRowsToPage}).
          * Precomputed once here so the per-batch hint pass iterates only string columns rather than
@@ -2506,6 +2553,19 @@ public class CsvFormatReader implements SegmentableFormatReader {
                 projectedAttrs[i] = attr;
                 projectedTypes[i] = attr.dataType();
             }
+            // Resolve declared per-column date formatters ONCE (never per row). declaredDateFormats is physical-keyed
+            // and projectedAttrs carry physical (post-rename) names, so they line up by name. A column with no declared
+            // format keeps a null slot and follows today's ISO/file-level path unchanged.
+            if (declaredDateFormats.isEmpty() == false) {
+                declaredFormatters = new DateFormatter[columnCount];
+                for (int i = 0; i < columnCount; i++) {
+                    Attribute attr = projectedAttrs[i];
+                    String pattern = attr != null ? declaredDateFormats.get(attr.name()) : null;
+                    if (pattern != null) {
+                        declaredFormatters[i] = DateFormatter.forPattern(pattern);
+                    }
+                }
+            }
             int[] stringSlots = new int[columnCount];
             int stringColumns = 0;
             for (int i = 0; i < columnCount; i++) {
@@ -2623,7 +2683,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
                 }
                 int si = projectedIdx[i];
                 String value = si < row.length ? row[si] : null;
-                Object result = tryConvertValue(value, projectedTypes[i]);
+                Object result = tryConvertValue(value, projectedTypes[i], i);
                 if (lastFieldError != null) {
                     if (mode == ErrorPolicy.Mode.NULL_FIELD.ordinal()) {
                         rowBuffer[i] = null;
@@ -2931,7 +2991,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
          * parse errors through the error policy.
          */
         private boolean emitConvertedStringField(String value, int bufIdx, DataType dt, String rawLine) {
-            Object result = tryConvertValue(value, dt);
+            Object result = tryConvertValue(value, dt, bufIdx);
             if (lastFieldError != null) {
                 if (modeOrdinal == ErrorPolicy.Mode.NULL_FIELD.ordinal()) {
                     rowBuffer[bufIdx] = null;
@@ -2949,7 +3009,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
             return true;
         }
 
-        private Object tryConvertValue(String value, DataType dataType) {
+        private Object tryConvertValue(String value, DataType dataType, int columnIndex) {
             if (value == null || value.isEmpty() || value.equalsIgnoreCase("null")) {
                 return null;
             }
@@ -2957,7 +3017,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
                 return null;
             }
             if (bracketMultiValues && value.startsWith("[") && value.endsWith("]")) {
-                return tryConvertMultiValue(value, dataType);
+                return tryConvertMultiValue(value, dataType, columnIndex);
             }
             return switch (dataType) {
                 case INTEGER -> tryParseInt(value);
@@ -2965,7 +3025,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
                 case DOUBLE -> tryParseDouble(value);
                 case KEYWORD, TEXT -> new BytesRef(value);
                 case BOOLEAN -> tryParseBoolean(value);
-                case DATETIME -> tryParseDatetime(value);
+                case DATETIME -> tryParseDatetime(value, columnIndex);
                 case DATE_NANOS -> tryParseDateNanos(value);
                 case IP -> tryParseIp(value);
                 case VERSION -> tryParseVersion(value);
@@ -2977,7 +3037,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
             };
         }
 
-        private Object tryConvertMultiValue(String value, DataType dataType) {
+        private Object tryConvertMultiValue(String value, DataType dataType, int columnIndex) {
             String content = value.substring(1, value.length() - 1).trim();
             if (content.isEmpty()) {
                 return null;
@@ -2985,7 +3045,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
             List<String> parts = splitBracketContent(content);
             List<Object> result = new ArrayList<>(parts.size());
             for (String part : parts) {
-                Object elem = parseElement(part, dataType);
+                Object elem = parseElement(part, dataType, columnIndex);
                 if (lastFieldError != null) {
                     return null;
                 }
@@ -3033,7 +3093,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
             return result;
         }
 
-        private Object parseElement(String value, DataType dataType) {
+        private Object parseElement(String value, DataType dataType, int columnIndex) {
             if (value == null || value.isEmpty() || value.equalsIgnoreCase("null")) {
                 return null;
             }
@@ -3050,7 +3110,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
                 case DOUBLE -> tryParseDouble(value);
                 case KEYWORD, TEXT -> new BytesRef(value);
                 case BOOLEAN -> tryParseBoolean(value);
-                case DATETIME -> tryParseDatetime(value);
+                case DATETIME -> tryParseDatetime(value, columnIndex);
                 case DATE_NANOS -> tryParseDateNanos(value);
                 case IP -> tryParseIp(value);
                 case VERSION -> tryParseVersion(value);
@@ -3111,7 +3171,19 @@ public class CsvFormatReader implements SegmentableFormatReader {
             }
         }
 
-        private Object tryParseDatetime(String value) {
+        private Object tryParseDatetime(String value, int columnIndex) {
+            // A column with a declared `format` parses strictly with that ES DateFormatter, overriding the numeric
+            // epoch shortcut, the file-level datetime_format, and the ISO fast path — for THIS column only. parseMillis
+            // is zone-aware (defaults a missing zone to UTC), unlike the LocalDateTime.parse path below which discards
+            // any parsed offset. Other columns keep exactly today's behavior.
+            if (declaredFormatters != null && declaredFormatters[columnIndex] != null) {
+                try {
+                    return declaredFormatters[columnIndex].parseMillis(value);
+                } catch (Exception e) {
+                    lastFieldError = "Failed to parse CSV datetime value [" + value + "]";
+                    return null;
+                }
+            }
             if (looksNumeric(value)) {
                 try {
                     return Long.parseLong(value);
